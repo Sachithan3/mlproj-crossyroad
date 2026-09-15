@@ -28,4 +28,4 @@ model.learn(total_timesteps=100000)
 print("Training Complete!")
 
 # 4. Save Trained Model Weights
-model.save("ppo_frogger_model")
+model.save("ppo_model")

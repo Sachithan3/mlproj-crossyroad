@@ -93,7 +93,7 @@ from crossy_env import GridEnv
 env = GridEnv()
 model = PPO("MlpPolicy", env=env, learning_rate=0.0003, ...)
 model.learn(total_timesteps=100000)
-model.save("ppo_frogger_model")
+model.save("ppo_model")
 * MlpPolicy = a simple neural network (multi-layer perceptron) that takes the 7-int observation and outputs an action
 * model.learn() = trains for 100K timesteps (each timestep = one env.step())
 * model.save() = saves trained weights to a .zip file

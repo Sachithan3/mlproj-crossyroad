@@ -4,7 +4,6 @@ import numpy as np
 
 class GridEnv(gym.Env):
     """
-    Custom Environment for a 2D Frogger-style Grid World
     Grid Size: 8 rows x 7 cols
     """
     def __init__(self, width=7, height=8):
