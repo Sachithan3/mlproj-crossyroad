@@ -1,0 +1,13 @@
+# Virtual environments
+myenv/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Trained models
+*.zip
+ppo_frogger_model*
+
+# Misc
+.DS_Store
