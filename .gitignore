@@ -5,6 +5,8 @@ myenv/
 __pycache__/
 *.py[cod]
 
+explanation.md
+
 # Trained models
 *.zip
 ppo_frogger_model*
