@@ -1,3 +1,5 @@
+For proper viewing on github, switch this file to code and do not view the preview
+
 Project Overview
 Title: A Comparative Study of Value-Based, Policy-Based, and Hybrid RL Algorithms for Control Task Optimization
 What it is: You have 3 people, each implementing 2 algorithms (6 total) that all train on the same custom environment. The goal is to compare how different families of RL algorithms perform on the same task.
