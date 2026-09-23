@@ -1,31 +1,35 @@
 import time
 from stable_baselines3 import PPO
 from stable_baselines3.common.env_checker import check_env
-from crossy_env import GridEnv  # Import your custom environment class
+from crossy_env import GridEnv
 
-# 1. Instantiate and Validate Environment
-env = GridEnv()
 
-# Optional: Run Gym's internal checker to confirm space compliance
-check_env(env)
+def main():
+    env = GridEnv()
+    check_env(env)
+    print("Env OK\n")
 
-# 2. Initialize PPO Model
-# 'MlpPolicy' handles 1D vector observations using a standard Multi-Layer Perceptron
-model = PPO(
-    policy="MlpPolicy",
-    env=env,
-    learning_rate=0.0003,
-    n_steps=2048,
-    batch_size=64,
-    n_epochs=10,
-    gamma=0.99,  # Discount factor for future rewards
-    verbose=1,
-)
+    model = PPO("MlpPolicy", env, verbose=1, ent_coef=0.05, learning_rate=3e-4)
+    model.learn(total_timesteps=200_000)
+    model.save("ppo_crossy_agent")
+    print("Model saved\n")
 
-# 3. Train the Agent
-print("Starting PPO Training...")
-model.learn(total_timesteps=100000)
-print("Training Complete!")
+    # Watch one episode
+    obs, _ = env.reset()
+    env.render()
+    done = False
+    total_reward = 0
+    while not done:
+        action, _ = model.predict(obs, deterministic=True)
+        obs, reward, terminated, truncated, info = env.step(action)
+        total_reward += reward
+        env.render()
+        time.sleep(0.3)
+        done = terminated or truncated
 
-# 4. Save Trained Model Weights
-model.save("ppo_model")
+    print(f"\nResult: {info.get('reason', 'timeout')}  |  Total reward: {total_reward:.1f}")
+    env.close()
+
+
+if __name__ == "__main__":
+    main()

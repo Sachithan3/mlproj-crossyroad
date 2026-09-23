@@ -9,7 +9,7 @@ explanation.md
 
 # Trained models
 *.zip
-ppo_frogger_model*
+ppo_cross_agent.zip
 
 # Misc
 .DS_Store
