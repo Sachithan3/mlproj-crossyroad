@@ -35,12 +35,19 @@ from rl_common import (
     SEED,
     CheckpointError,
     algorithm_rankings,
-    best_metrics,
+    comparison_metrics,
     convergence,
     load_policy,
-    load_results,
     make_env,
 )
+
+# Medal colours for the rank badge (ranks are unique, so one gold/silver/bronze).
+RANK_COLORS = {
+    1: (255, 200, 60),   # gold
+    2: (190, 200, 215),  # silver
+    3: (210, 140, 80),   # bronze
+}
+RANK_COLOR_DEFAULT = (120, 170, 235)
 
 # --- Grid / panel constants ----------------------------------------------
 GRID_COLS = 7
@@ -306,11 +313,11 @@ class AgentPanel:
     def __init__(self, algo, rank=None):
         self.algo = algo
         self.spec = ALGORITHM_SPECS[algo]
-        self.rank = rank  # 1-based evaluation rank, or None if unranked
+        self.rank = rank  # unique 1-based rank (#1, #2, #3, ...), or None
         self.env = make_env()
         self.act = None
         self.error = None
-        self.metrics = None
+        self.metrics = None  # comparison_metrics profile
         self.verdict = None
 
         self.episode = 0
@@ -326,14 +333,23 @@ class AgentPanel:
         self._load()
 
     def display_name(self):
+        return self.spec["label"]
+
+    def rank_color(self):
         if self.rank is None:
-            return self.spec["label"]
-        return f"#{self.rank}  {self.spec['label']}"
+            return RANK_COLOR_DEFAULT
+        return RANK_COLORS.get(self.rank, RANK_COLOR_DEFAULT)
 
     # -- setup ---------------------------------------------------------
     def _load(self):
-        self.metrics = best_metrics(load_results(self.algo))
-        self.verdict = convergence(self.metrics)
+        self.metrics = comparison_metrics(self.algo)
+        self.verdict = convergence(
+            {
+                "mean_reward": self.metrics.get("mean_reward"),
+                "success_rate": self.metrics.get("success_rate"),
+                "episodes": self.metrics.get("eval_episodes"),
+            }
+        )
         try:
             self.act = load_policy(self.algo)
         except CheckpointError as exc:
@@ -402,22 +418,45 @@ class AgentPanel:
         return text
 
     def report_rows(self):
-        """Label/value rows for the evaluation report (empty without data)."""
+        """Comparison rows that actually separate the six models."""
         if self.act is None:
             return []
-        metrics = self.metrics
-        if not metrics or metrics.get("mean_reward") is None:
+        metrics = self.metrics or {}
+        if metrics.get("mean_reward") is None:
             return []
+
+        def fmt_steps(value):
+            if value is None:
+                return "—"
+            return f"{int(value):,}"
+
+        def fmt_secs(value):
+            if value is None:
+                return "—"
+            value = float(value)
+            if value < 60:
+                return f"{value:.1f}s"
+            return f"{value / 60.0:.1f}m"
+
         rows = [
             ("mean reward", f"{metrics['mean_reward']:+.2f}"),
-        ]
-        if metrics.get("std_reward") is not None:
-            rows.append(("std reward", f"{metrics['std_reward']:.2f}"))
-        rows += [
             ("success rate", f"{100.0 * metrics['success_rate']:.0f}%"),
-            ("mean episode len", f"{metrics['mean_length']:.1f}"),
-            ("eval episodes", str(metrics.get("episodes", "-"))),
+            # Path efficiency: shorter goal episodes rank higher.
+            ("path length", f"{metrics['mean_length']:.1f} steps"),
+            # Sample efficiency: earlier first convergence ranks higher, but the
+            # restored-checkpoint step breaks ties between transient runs.
+            ("first converged", fmt_steps(metrics.get("steps_to_converge"))),
+            ("best checkpoint", fmt_steps(metrics.get("best_checkpoint_step"))),
+            ("reward / step", f"{metrics['reward_per_step']:+.2f}"),
+            ("train time", fmt_secs(metrics.get("train_duration_sec"))),
         ]
+        if metrics.get("train_success_rate") is not None:
+            rows.append(
+                (
+                    "train success",
+                    f"{100.0 * metrics['train_success_rate']:.0f}%",
+                )
+            )
         return rows
 
     def verdict_chip(self):
@@ -479,9 +518,22 @@ class AgentPanel:
         pad = layout.pad
         y = rect.y + pad
 
-        # Ranked model name + status chip (#1, #2, ... from evaluation)
+        # Rank badge (#1 / #2 / …) then model name; status chip on the right.
+        name_x = info.x
+        if self.rank is not None:
+            rank_rect = draw_badge(
+                screen,
+                fonts["name"],
+                f"#{self.rank}",
+                self.rank_color(),
+                info.x,
+                y,
+                info.w,
+            )
+            name_x = rank_rect.right + max(6, pad // 2)
+
         name = fonts["name"].render(self.display_name(), True, COLOR_TEXT)
-        screen.blit(name, (info.x, y))
+        screen.blit(name, (name_x, y + max(0, (rank_rect.h - name.get_height()) // 2) if self.rank is not None else y))
 
         chip_text, chip_color = self.status_chip()
         chip_font = fonts["top_meta"]
@@ -497,15 +549,19 @@ class AgentPanel:
         pygame.draw.rect(screen, chip_color, chip, 1, border_radius=4)
         screen.blit(chip_label, (chip.x + 6, chip.y + 3))
 
+        title_h = name.get_height()
+        if self.rank is not None:
+            title_h = max(title_h, rank_rect.h)
+
         # Category + live counters
-        live_y = y + name.get_height() + max(2, pad // 2)
+        live_y = y + title_h + max(2, pad // 2)
         live = f"{self.spec['category']}  ·  {self.live_line()}"
         live_surf = fonts["meta"].render(live, True, COLOR_TEXT_DIM)
         if live_surf.get_width() > info.w:
             live_surf = fonts["top_meta"].render(live, True, COLOR_TEXT_DIM)
         screen.blit(live_surf, (info.x, live_y))
 
-        # Evaluation report
+        # Comparison report (metrics that separate the models)
         report_y = live_y + live_surf.get_height() + pad
         report_y = self._draw_report(screen, fonts, layout, info, report_y)
 
@@ -531,7 +587,7 @@ class AgentPanel:
         value_font = fonts["metric"]
 
         header = label_font.render(
-            "EVALUATION",
+            "COMPARISON",
             True,
             CATEGORY_COLORS.get(self.spec["category"], COLOR_TEXT_DIM),
         )
@@ -652,7 +708,9 @@ def draw_top_bar(screen, fonts, layout, fps, paused, fullscreen):
     )
 
     title = fonts["top"].render(
-        "Crossy Road  ·  6 algorithms, identical conditions", True, COLOR_TEXT
+        "Crossy Road  ·  ranked by success, reward, path length, sample efficiency",
+        True,
+        COLOR_TEXT,
     )
     screen.blit(title, (layout.margin, (layout.top_bar - title.get_height()) // 2))
 
@@ -709,16 +767,28 @@ def save_frame(screen, directory, frame):
 def load_panels():
     ranks = algorithm_rankings(PANEL_ORDER)
     panels = [AgentPanel(algo, rank=ranks.get(algo)) for algo in PANEL_ORDER]
+    print(
+        "Rank key: converged → success → mean reward → shorter path → first "
+        "convergence → earlier restored checkpoint (unique ranks; fixed panel "
+        "order is the final tie-break)"
+    )
     for panel in panels:
         spec = panel.spec
         rank_tag = f"#{panel.rank}" if panel.rank is not None else "--"
+        metrics = panel.metrics or {}
         if panel.act is not None:
             converged = (panel.verdict or {}).get("converged")
-            metrics = panel.metrics or {}
+            converge_steps = metrics.get("steps_to_converge")
+            best_steps = metrics.get("best_checkpoint_step")
+            converge_txt = (
+                f"{int(converge_steps):,}" if converge_steps is not None else "—"
+            )
+            best_txt = f"{int(best_steps):,}" if best_steps is not None else "—"
             print(
                 f"[ok]   {rank_tag:>3s} {spec['label']:11s} {spec['category']:13s} "
                 f"mean {metrics.get('mean_reward', float('nan')):+8.2f}  "
-                f"success {100.0 * (metrics.get('success_rate') or 0):5.1f}%  "
+                f"len {metrics.get('mean_length', float('nan')):5.1f}  "
+                f"conv@{converge_txt:>6s}  best@{best_txt:>6s}  "
                 f"{'converged' if converged else 'not converged'}"
             )
         else:

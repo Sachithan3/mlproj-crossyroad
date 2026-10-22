@@ -357,25 +357,216 @@ def best_metrics(results):
     return None
 
 
-def algorithm_rankings(order=None):
-    """Rank algorithms by evaluation success rate, then mean reward.
+def _meets_convergence(mean_reward, success_rate):
+    return (
+        success_rate is not None
+        and mean_reward is not None
+        and float(success_rate) >= CONVERGENCE_MIN_SUCCESS_RATE
+        and float(mean_reward) >= CONVERGENCE_MIN_MEAN_REWARD
+    )
 
-    Returns ``{algo: rank}`` where rank is 1-based among algorithms that have
-    evaluation metrics. Algorithms without metrics are omitted (visualizer
-    shows them unranked). Ties keep the panel order as a stable tie-break.
+
+def steps_to_converge_from_history(history):
+    """Earliest logged timestep that already meets the convergence criterion."""
+    for entry in history or []:
+        if _meets_convergence(entry.get("mean_reward"), entry.get("success_rate")):
+            step = entry.get("timestep")
+            return int(step) if step is not None else None
+    return None
+
+
+def _load_sb3_evals(path=os.path.join(RESULTS_DIR, "evaluations.npz")):
+    """PPO's SB3 EvalCallback dump as ``(timesteps, mean_rewards)`` or None."""
+    if not os.path.exists(path):
+        return None
+    try:
+        import numpy as np
+
+        data = np.load(path)
+        timesteps = data["timesteps"]
+        rewards = data["results"]  # shape (n_evals, n_episodes)
+    except Exception:
+        return None
+    return timesteps, rewards.mean(axis=1)
+
+
+def steps_to_converge_from_sb3_npz(path=os.path.join(RESULTS_DIR, "evaluations.npz")):
+    """Read PPO's SB3 EvalCallback dump for the first converging eval point."""
+    loaded = _load_sb3_evals(path)
+    if loaded is None:
+        return None
+    timesteps, mean_rewards = loaded
+    for step, mean_reward in zip(timesteps, mean_rewards):
+        # Goal episodes dominate; treat mean_reward as the success proxy for
+        # SB3 logs that do not store success flags.
+        success_rate = float((float(mean_reward) >= CONVERGENCE_MIN_MEAN_REWARD))
+        if _meets_convergence(float(mean_reward), success_rate):
+            return int(step)
+    return None
+
+
+def best_checkpoint_step_from_history(history):
+    """Timestep of the eval point that training would restore as "best".
+
+    ``PeriodicEvaluator`` keeps the first entry with the highest
+    ``(success_rate, mean_reward)`` score (strict improvement only). That is the
+    policy actually saved in the checkpoint, which can be later than the first
+    transient convergence (A3C is the clearest example here).
+    """
+    best_score = None
+    best_step = None
+    for entry in history or []:
+        success = entry.get("success_rate")
+        reward = entry.get("mean_reward")
+        step = entry.get("timestep")
+        if success is None or reward is None or step is None:
+            continue
+        score = (float(success), float(reward))
+        if best_score is None or score > best_score:
+            best_score = score
+            best_step = int(step)
+    return best_step
+
+
+def best_checkpoint_step_from_sb3_npz(
+    path=os.path.join(RESULTS_DIR, "evaluations.npz"),
+):
+    """Timestep SB3's ``EvalCallback`` saved as ``best_model.zip``.
+
+    The callback keeps the first eval with the highest mean reward, so the first
+    ``argmax`` matches the checkpoint that was restored after training.
+    """
+    loaded = _load_sb3_evals(path)
+    if loaded is None:
+        return None
+    timesteps, mean_rewards = loaded
+    if len(timesteps) == 0:
+        return None
+    index = int(mean_rewards.argmax())
+    return int(timesteps[index])
+
+
+def comparison_metrics(algo):
+    """Metrics used to compare and rank algorithms side by side.
+
+    Final-policy quality (eval success / reward / path length) is primary;
+    sample efficiency (first convergence, then the restored-checkpoint step)
+    breaks remaining ties so the six models are not all identical on the HUD.
+    Wall-clock train time is reported but not used for ranking.
+    """
+    results = load_results(algo)
+    evaluation = best_metrics(results) or {}
+    training = (results or {}).get("training") or {}
+    history = training.get("eval_history") or []
+
+    mean_reward = evaluation.get("mean_reward")
+    success_rate = evaluation.get("success_rate")
+    mean_length = evaluation.get("mean_length")
+    std_reward = evaluation.get("std_reward")
+
+    steps_to_conv = steps_to_converge_from_history(history)
+    best_step = best_checkpoint_step_from_history(history)
+    if algo == "ppo":
+        if steps_to_conv is None:
+            steps_to_conv = steps_to_converge_from_sb3_npz()
+        if best_step is None:
+            best_step = best_checkpoint_step_from_sb3_npz()
+
+    duration = training.get("duration_sec")
+    train_success = (training.get("summary") or {}).get("success_rate")
+
+    reward_per_step = None
+    if mean_reward is not None and mean_length not in (None, 0):
+        reward_per_step = float(mean_reward) / float(mean_length)
+
+    verdict = convergence(evaluation if evaluation else None)
+    return {
+        "algorithm": algo,
+        "label": ALGORITHM_SPECS[algo]["label"],
+        "category": ALGORITHM_SPECS[algo]["category"],
+        "mean_reward": None if mean_reward is None else float(mean_reward),
+        "std_reward": None if std_reward is None else float(std_reward),
+        "success_rate": None if success_rate is None else float(success_rate),
+        "mean_length": None if mean_length is None else float(mean_length),
+        "reward_per_step": reward_per_step,
+        "steps_to_converge": steps_to_conv,
+        "best_checkpoint_step": best_step,
+        "train_duration_sec": None if duration is None else float(duration),
+        "train_success_rate": None if train_success is None else float(train_success),
+        "eval_episodes": evaluation.get("episodes"),
+        "converged": bool(verdict.get("converged")),
+        "evaluated": bool(verdict.get("evaluated")),
+    }
+
+
+def _rank_sort_key(profile):
+    """Better policies sort first: success, reward, short path, fast converge.
+
+    Wall-clock train time is shown in the HUD but not used for ranking -- it
+    mixes hardware noise with algorithmic cost. The timestep of the checkpoint
+    that was actually restored breaks a first-convergence tie, because a
+    transient early convergence that was later abandoned should not beat a
+    checkpoint that is still good. Exact ties fall back to the fixed panel
+    order in ``algorithm_rankings``.
+    """
+    success = profile.get("success_rate")
+    reward = profile.get("mean_reward")
+    length = profile.get("mean_length")
+    converge_steps = profile.get("steps_to_converge")
+    best_step = profile.get("best_checkpoint_step")
+    # Quantise reward so tiny float noise (1e-14) does not break ties.
+    reward_key = None if reward is None else round(float(reward), 2)
+    length_key = None if length is None else round(float(length), 1)
+    return (
+        1 if profile.get("converged") else 0,
+        -1.0 if success is None else -float(success),
+        -1e18 if reward_key is None else -reward_key,
+        1e18 if length_key is None else length_key,
+        1e18 if converge_steps is None else float(converge_steps),
+        1e18 if best_step is None else float(best_step),
+    )
+
+
+def algorithm_rankings(order=None):
+    """Unique 1-based ranks (#1, #2, #3, ...) from ``comparison_metrics``.
+
+    Ranks are strictly ordered, never duplicated: after the quality and
+    sample-efficiency keys, the restored-checkpoint timestep and finally the
+    fixed panel order break any remaining tie. Algorithms without evaluation
+    metrics are omitted (the visualizer shows them unranked).
     """
     order = tuple(order or ALGORITHMS)
+    order_index = {algo: index for index, algo in enumerate(order)}
     scored = []
-    for index, algo in enumerate(order):
-        metrics = best_metrics(load_results(algo))
-        if not metrics or metrics.get("mean_reward") is None:
+    for algo in order:
+        profile = comparison_metrics(algo)
+        if not profile.get("evaluated") or profile.get("mean_reward") is None:
             continue
-        success = float(metrics.get("success_rate") or 0.0)
-        mean_reward = float(metrics["mean_reward"])
-        scored.append((success, mean_reward, -index, algo))
+        scored.append((_rank_sort_key(profile), order_index[algo], algo))
 
-    scored.sort(reverse=True)
-    return {algo: rank for rank, (*_, algo) in enumerate(scored, start=1)}
+    scored.sort(key=lambda item: (item[0], item[1]))
+    ranks = {}
+    for rank, (_, _, algo) in enumerate(scored, start=1):
+        ranks[algo] = rank
+    return ranks
+
+
+def comparison_table(order=None):
+    """All comparison profiles plus ranks, sorted best → worst."""
+    order = tuple(order or ALGORITHMS)
+    ranks = algorithm_rankings(order)
+    rows = []
+    for algo in order:
+        profile = comparison_metrics(algo)
+        profile["rank"] = ranks.get(algo)
+        rows.append(profile)
+    rows.sort(
+        key=lambda row: (
+            999 if row["rank"] is None else row["rank"],
+            row["algorithm"],
+        )
+    )
+    return rows
 
 
 # ===========================================================================
