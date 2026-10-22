@@ -110,3 +110,111 @@ The environment is shared — nobody modifies crossy_env.py. Each person just wr
 
 
 Next step for the project (after first review is to add visualization using pygame or something to see what the model actually does finally)
+
+
+Standardized Training, Evaluation and 6-Panel Visualization
+
+Pipeline (three separate operations):
+
+    # 1. train one algorithm (repeat for every algorithm)
+    for a in ppo reinforce dqn ddqn a2c a3c; do python train.py --algo $a; done
+
+    # 2. evaluate every saved checkpoint with the shared protocol
+    python evaluate.py
+
+    # 3. replay all six checkpoints side by side (2 columns x 3 rows)
+    python visualize.py
+
+Shared conditions (defined once in rl_common.py). Every algorithm uses the
+same environment instance settings, starting state, seed, budget, evaluation
+protocol and logging cadence:
+
+    env            GridEnv(width=7, height=8, max_steps=100)  (unchanged)
+    observation    [agent_x, agent_y, car_row1_x .. car_row5_x]
+    actions        5 discrete (UP, DOWN, LEFT, RIGHT, STAY)
+    reward         progress * 5.0 - 0.1 per step, -10 collision, +100 goal
+    episode end    goal_reached / collision / truncated at 100 steps
+    seed           0                              (--seed to override)
+    budget         20,000 environment steps       (--timesteps for the
+                   five from-scratch algorithms; PPO's preserved block
+                   fixes its own 20,000)
+    eval cadence   every 5,000 env steps, 20 greedy episodes
+    logging        every 10 episodes (identical log fields)
+    checkpoints    ppo_crossy_agent.zip, reinforce/dqn/ddqn/a2c/a3c_crossy_agent.pt
+    results        results/<algo>.json (one machine-readable file per algorithm)
+
+Algorithm-specific hyperparameters are intentionally NOT forced to match,
+because the same number means different things in different methods:
+
+    REINFORCE   lr 3e-4, grad clip 0.5
+    DQN / DDQN  lr 1e-3, buffer 50k, batch 64, learning_starts 1k,
+                target sync 500 steps, epsilon 1.0 -> 0.05 over 50% of training
+                (DQN and Double DQN differ only in the bootstrap target)
+    A2C         5-step rollouts, lr 7e-4, value coef 0.5, entropy coef 0.01,
+                grad clip 0.5
+    A3C         same shape as A2C, grad clip 40.0 (asynchronous shared update),
+                4 workers, seeds seed+worker_id
+    PPO         SB3 defaults with ent_coef 0.05 and lr 3e-4 (unchanged)
+
+Shared by all six because the meaning is equivalent: MLP hidden width 64,
+gamma 0.99, budget in environment steps, greedy evaluation.
+
+Metrics (training and evaluation are kept separate):
+
+    training    episode rewards/lengths/successes, mean episode reward,
+                duration, total environment steps, periodic eval history
+    evaluation  mean eval reward, std, min, max, success rate, mean episode
+                length, episode count, seed
+
+results/<algo>.json layout:
+
+    algorithm, label, category, seed, total_timesteps, checkpoint,
+    shared_config, hyperparameters, notes,
+    training   { timesteps, episodes, duration_sec, episode_rewards,
+                 episode_lengths, episode_successes, summary, eval_history }
+    evaluation { episodes, mean_reward, std_reward, min_reward, max_reward,
+                 success_rate, mean_length, seed, source, convergence }
+
+Convergence criterion (explicit, applied to every "converged" label):
+
+    success rate >= 90%  AND  mean evaluation reward >= +100
+    (20 greedy evaluation episodes)
+
+The verdict and the numbers it was checked against are stored as
+evaluation.convergence in results/<algo>.json. A model without evaluation data
+is reported as NOT EVALUATED, never as converged or as failed.
+
+Visualization: visualize.py is fullscreen by default (--windowed and --size for
+a window, F toggles at runtime) and shows all six agents in a 2x3 grid (rows
+group policy-based / value-based / hybrid). Every panel owns its own GridEnv,
+episode counters and restart state, so a goal/crash never pauses or resets the
+others. Stepping is strictly uniform: each frame advances every loaded panel by
+exactly one environment step; a finished episode restarts on the next frame and
+the outcome is reported by a status chip plus a short border flash.
+
+Each panel keeps its board on the left and, under the model name, a labelled
+evaluation report: mean reward, std reward, success rate, mean episode length
+and episode count, then an explicit verdict badge (CONVERGED / NOT CONVERGED /
+NOT EVALUATED / NO CHECKPOINT) with the criterion it was checked against. Live
+counters (episode, step, current reward, action, goals so far) sit just above
+the report.
+
+Missing or unloadable checkpoints render a placeholder with the command to
+train them instead of aborting the window. Keys: Space pause, Up/Down speed,
+R restart, F fullscreen, Esc quit. Headless rendering (CI/screenshots):
+
+    python visualize.py --headless --frames 40 --save-frames viz_frames
+
+Layout is computed from the actual display size, so the same command fills a
+1080p screen or a smaller window without clipping.
+
+Known limitations:
+- GridEnv is fully deterministic and reset() ignores the seed, so every
+evaluation episode is identical. Evaluation std is therefore ~0 for greedy
+policies; the metric is still computed and reported.
+- PPO's implementation is preserved verbatim, so it has no in-training
+evaluation hook; its evaluation metrics come from evaluate.py. Its training
+rewards are SB3's rolling last-100 episode buffer, not a full episode log.
+- Not every algorithm converges within 20k steps (e.g. DQN/DDQN/A3C are still
+near-random in the current run). That is expected: the comparison is about
+comparable conditions and metrics, not about forcing convergence.

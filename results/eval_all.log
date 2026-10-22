@@ -1,0 +1,26 @@
+[eval] PPO         (policy-based) | mean   134.20 +/-   0.00 | success 100.0% | len    8.0 | 20 episodes | CONVERGED
+[eval] REINFORCE   (policy-based) | mean   133.50 +/-   0.00 | success 100.0% | len   15.0 | 20 episodes | CONVERGED
+[eval] DQN         (value-based ) | mean    -5.00 +/-   0.00 | success   0.0% | len  100.0 | 20 episodes | not converged
+[eval] Double DQN  (value-based ) | mean   133.80 +/-   0.00 | success 100.0% | len   12.0 | 20 episodes | CONVERGED
+[eval] A2C         (hybrid      ) | mean   134.20 +/-   0.00 | success 100.0% | len    8.0 | 20 episodes | CONVERGED
+[eval] A3C         (hybrid      ) | mean   134.20 +/-   0.00 | success 100.0% | len    8.0 | 20 episodes | CONVERGED
+
+Summary (sorted by mean evaluation reward)
+algorithm   category           mean      std  success  length  converged
+ppo         policy-based     134.20     0.00   100.0%     8.0  yes
+a2c         hybrid           134.20     0.00   100.0%     8.0  yes
+a3c         hybrid           134.20     0.00   100.0%     8.0  yes
+ddqn        value-based      133.80     0.00   100.0%    12.0  yes
+reinforce   policy-based     133.50     0.00   100.0%    15.0  yes
+dqn         value-based       -5.00     0.00     0.0%   100.0  no
+
+Convergence criterion: success rate >= 90% and mean reward >= +100.0 over the evaluation episodes.
+Results written to results/<algo>.json
+[eval] DQN         (value-based ) | mean   133.80 +/-   0.00 | success 100.0% | len   12.0 | 20 episodes | CONVERGED
+
+Summary (sorted by mean evaluation reward)
+algorithm   category           mean      std  success  length  converged
+dqn         value-based      133.80     0.00   100.0%    12.0  yes
+
+Convergence criterion: success rate >= 90% and mean reward >= +100.0 over the evaluation episodes.
+Results written to results/<algo>.json

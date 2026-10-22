@@ -62,25 +62,29 @@ class GridEnv(gym.Env):
         if self.agent_pos[1] in self.car_rows:
             i = self.car_rows.index(self.agent_pos[1])
             if self.agent_pos[0] == self.car_positions[i]:
-                return self._get_obs(), -10, True, False, {"reason": "collision"}
+                return self._get_obs(), -10.0, True, False, {"reason": "collision"}
 
-        # Move cars right
+        # Move cars right (spawn positions and motion unchanged)
         self.car_positions = [(c + 1) % self.width for c in self.car_positions]
 
         # Check 2: a car moved into agent
         if self.agent_pos[1] in self.car_rows:
             i = self.car_rows.index(self.agent_pos[1])
             if self.agent_pos[0] == self.car_positions[i]:
-                return self._get_obs(), -10, True, False, {"reason": "collision"}
+                return self._get_obs(), -10.0, True, False, {"reason": "collision"}
 
         truncated = self.current_step >= self.max_steps
 
-        if self.agent_pos[1] == 0:
-            return self._get_obs(), 100, True, False, {"reason": "goal_reached"}
+        # Dense progress shaping, including the goal step so the final UP is
+        # not a sparse-only transition. Collision stays at -10 so exploration
+        # is not frozen into perpetual STAY.
+        progress = float(prev_y - self.agent_pos[1])
+        shaped = progress * 5.0 - 0.1
 
-        # Progress reward
-        reward = (prev_y - self.agent_pos[1]) * 5.0 - 0.1
-        return self._get_obs(), reward, False, truncated, {}
+        if self.agent_pos[1] == 0:
+            return self._get_obs(), 100.0 + shaped, True, False, {"reason": "goal_reached"}
+
+        return self._get_obs(), shaped, False, truncated, {}
 
     def render(self):
         grid = [["." for _ in range(self.width)] for _ in range(self.height)]
