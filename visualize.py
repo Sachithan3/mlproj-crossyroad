@@ -16,8 +16,12 @@ Design notes
   result chip and a short border flash.
 * Only checkpoints are loaded here -- nothing is trained. Missing or
   unloadable checkpoints render a placeholder instead of aborting the window.
+* A small ``Inferences`` button in the top bar (key ``I``) opens a modal that
+  explains, in one short line per model, why the ranking looks the way it
+  does -- the plain-language version of ``INFERENCES.md``.
 
-Keys: Space pause, Up/Down speed, R restart every panel, F fullscreen, Esc quit.
+Keys: Space pause, Up/Down speed, R restart every panel, F fullscreen,
+Inferences button / I open the breakdown, Esc closes it (then quits).
 Headless: ``python visualize.py --headless --frames 40 --save-frames frames``.
 """
 
@@ -97,6 +101,36 @@ CAR_COLORS = [
 ]
 
 ACTION_NAMES = {0: "UP", 1: "DOWN", 2: "LEFT", 3: "RIGHT", 4: "STAY"}
+
+# --- "Inferences" overlay: why each model did better ----------------------
+# Plain-language version of INFERENCES.md, one short line per algorithm.
+# All six models reach the goal 100%; reward = 135 - 0.1 * steps, so the only
+# real difference is how many steps each policy wastes on its route.
+INFERENCES_TITLE = "Why did each model do better?"
+
+INFERENCES_INTRO = (
+    "All six models reach the goal every time (100% success).",
+    "Reward = 135 - 0.1 x steps, so the winner is simply whoever takes "
+    "the fewest steps.",
+)
+
+# One plain sentence per algorithm (shown best rank first).
+INFERENCES_WHY = {
+    "ppo": "Shortest path (8 steps), found first at 15k steps - and it kept it.",
+    "a3c": "Same 8-step path, but it forgot it and re-learned it; the saved model is from 35k.",
+    "a2c": "Same 8-step path, but it found it only once, at 50k steps, then forgot it.",
+    "dqn": "Always reaches the goal, just 4 steps longer (12 steps) - a safer route.",
+    "ddqn": "Same 12-step route as DQN, but it needed 90k steps to lock it in.",
+    "reinforce": "Noisiest learning of the six, so it settles for the longest route (15 steps).",
+}
+
+INFERENCES_TAKEAWAY = (
+    "In short: policy gradient (PPO, A3C, A2C) found the shortest route, "
+    "value-based (DQN, Double DQN) plays it safer and longer, and REINFORCE "
+    "gets there but never sharpens the route.",
+    "Ties are broken by the earliest good checkpoint: "
+    "PPO 15k vs A3C 35k vs A2C 50k steps.",
+)
 
 
 class _Font:
@@ -305,6 +339,170 @@ def draw_badge(screen, font, text, color, left, top, max_width):
     pygame.draw.rect(screen, color, rect, border_radius=5)
     screen.blit(label, (rect.x + max(5, font.get_width("M")), rect.y + 4))
     return rect
+
+
+def wrap_text(font, text, max_width):
+    """Greedy word wrap using the font's real glyph widths."""
+    lines = []
+    current = ""
+    for word in text.split():
+        candidate = word if not current else f"{current} {word}"
+        if current and font.get_width(candidate) > max_width:
+            lines.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return lines or [""]
+
+
+def inferences_button_rect(layout, font):
+    """Top-bar ``Inferences`` button geometry.
+
+    Deterministic for a given layout+font, so drawing and hit-testing always
+    agree on the same rectangle.
+    """
+    pad = max(8, layout.margin)
+    width = font.get_width("Inferences") + 2 * pad
+    height = max(20, layout.top_bar - 12)
+    return pygame.Rect(
+        layout.width - layout.margin - width,
+        (layout.top_bar - height) // 2,
+        width,
+        height,
+    )
+
+
+def draw_inferences_button(screen, font, layout, active):
+    """Draw the Inferences button; filled accent while the overlay is open."""
+    accent = CATEGORY_COLORS["policy-based"]
+    rect = inferences_button_rect(layout, font)
+    if active:
+        bg, border, fg = accent, accent, (14, 15, 18)
+    else:
+        bg, border, fg = (30, 34, 44), accent, COLOR_TEXT
+    pygame.draw.rect(screen, bg, rect, border_radius=6)
+    pygame.draw.rect(screen, border, rect, 1, border_radius=6)
+    label = font.render("Inferences", True, fg)
+    screen.blit(label, label.get_rect(center=rect.center))
+    return rect
+
+
+def draw_inferences_overlay(screen, fonts, layout, panels):
+    """Dimmed modal: one plain-language line per model, best rank first."""
+    dim = pygame.Surface((layout.width, layout.height), pygame.SRCALPHA)
+    dim.fill((0, 0, 0, 170))
+    screen.blit(dim, (0, 0))
+    # Keep the button itself above the dim so it reads as the close toggle.
+    draw_inferences_button(screen, fonts["top"], layout, True)
+
+    title_font = fonts["top"]
+    label_font = fonts["metric"]
+    body_font = fonts["meta"]
+    hint_font = fonts["top_meta"]
+
+    accent = CATEGORY_COLORS["policy-based"]
+    pad = max(12, int(min(layout.width, layout.height) * 0.022))
+    gap = max(6, pad // 2)
+    width = min(layout.width - 2 * layout.margin, max(340, int(layout.width * 0.68)))
+    inner_w = width - 2 * pad
+
+    # Rank-ordered rows: "#1 PPO" label + one short explanation.
+    ordered = sorted(panels, key=lambda p: (p.rank is None, p.rank or 0))
+    labels = []
+    for panel in ordered:
+        text = (
+            f"#{panel.rank} {panel.display_name()}"
+            if panel.rank is not None
+            else panel.display_name()
+        )
+        labels.append((text, panel.rank_color(), INFERENCES_WHY.get(panel.algo, "")))
+
+    label_w = max((label_font.get_width(lab) for lab, _, _ in labels), default=0)
+    # Narrow window: stack the label above its line instead of side by side.
+    stacked = label_w + gap > inner_w // 2
+    label_col_w = 0 if stacked else label_w + gap
+
+    rows = []
+    for lab, color, text in labels:
+        rows.append((lab, color, wrap_text(body_font, text, max(40, inner_w - label_col_w))))
+
+    intro_lines = []
+    for para in INFERENCES_INTRO:
+        intro_lines.extend(wrap_text(body_font, para, inner_w))
+    takeaway_lines = []
+    for para in INFERENCES_TAKEAWAY:
+        takeaway_lines.extend(wrap_text(body_font, para, inner_w))
+
+    body_h = body_font.render("Ay", True, COLOR_TEXT).get_height()
+    title_h = title_font.render("Ay", True, COLOR_TEXT).get_height()
+    hint_h = hint_font.render("Ay", True, COLOR_TEXT).get_height()
+    label_h = label_font.render("Ay", True, COLOR_TEXT).get_height()
+
+    content_h = title_h + gap
+    content_h += len(intro_lines) * (body_h + 1) + gap
+    for _, _, lines in rows:
+        if stacked:
+            content_h += label_h + 1 + len(lines) * (body_h + 1)
+        else:
+            content_h += max(label_h, len(lines) * (body_h + 1)) + 1
+        content_h += gap
+    content_h += len(takeaway_lines) * (body_h + 1) + gap + hint_h
+
+    card_h = min(layout.height - 2 * layout.margin, content_h + 2 * pad)
+    card = pygame.Rect(
+        (layout.width - width) // 2,
+        (layout.height - card_h) // 2,
+        width,
+        card_h,
+    )
+    pygame.draw.rect(screen, COLOR_CARD, card, border_radius=10)
+    pygame.draw.rect(screen, COLOR_CARD_EDGE, card, 1, border_radius=10)
+
+    screen.set_clip(card)
+    x = card.x + pad
+    y = card.y + pad
+
+    screen.blit(title_font.render(INFERENCES_TITLE, True, accent), (x, y))
+    y += title_h + gap
+    for line in intro_lines:
+        screen.blit(body_font.render(line, True, COLOR_TEXT_DIM), (x, y))
+        y += body_h + 1
+    y += gap
+    pygame.draw.line(
+        screen,
+        COLOR_CARD_EDGE,
+        (x, y - gap // 2),
+        (card.right - pad, y - gap // 2),
+        1,
+    )
+    for lab, color, lines in rows:
+        lab_surf = label_font.render(lab, True, color)
+        if stacked:
+            screen.blit(lab_surf, (x, y))
+            y += label_h + 1
+            for line in lines:
+                screen.blit(body_font.render(line, True, COLOR_TEXT), (x, y))
+                y += body_h + 1
+        else:
+            block_h = max(label_h, len(lines) * (body_h + 1))
+            screen.blit(lab_surf, (x, y + max(0, (block_h - label_h) // 2)))
+            ly = y
+            for line in lines:
+                screen.blit(body_font.render(line, True, COLOR_TEXT), (x + label_col_w, ly))
+                ly += body_h + 1
+            y += block_h + 1
+        y += gap
+    for line in takeaway_lines:
+        screen.blit(body_font.render(line, True, (210, 220, 240)), (x, y))
+        y += body_h + 1
+    y += gap
+    screen.blit(
+        hint_font.render("Click Inferences (or press I) to close", True, COLOR_TEXT_DIM),
+        (x, y),
+    )
+    screen.set_clip(None)
 
 
 class AgentPanel:
@@ -701,7 +899,7 @@ class AgentPanel:
             )
 
 
-def draw_top_bar(screen, fonts, layout, fps, paused, fullscreen):
+def draw_top_bar(screen, fonts, layout, fps, paused, fullscreen, show_inferences=False):
     pygame.draw.rect(screen, COLOR_BG_HEADER, (0, 0, layout.width, layout.top_bar))
     pygame.draw.line(
         screen, (50, 50, 60), (0, layout.top_bar), (layout.width, layout.top_bar), 2
@@ -719,26 +917,39 @@ def draw_top_bar(screen, fonts, layout, fps, paused, fullscreen):
         f"{fps} FPS  ·  1 step/frame  ·  "
         f"{'PAUSED' if paused else 'running'}  ·  {mode}"
     )
-    controls = "Space pause · ↑/↓ speed · F fullscreen · R restart · Esc quit"
+    controls = (
+        "Space pause · ↑/↓ speed · F fullscreen · R restart · I inferences · Esc quit"
+    )
+    button = inferences_button_rect(layout, fonts["top"])
     for candidate in (f"{status}   |   {controls}", status):
         surf = fonts["top_meta"].render(candidate, True, COLOR_TEXT_DIM)
-        if title.get_width() + surf.get_width() + 4 * layout.margin <= layout.width:
+        if (
+            title.get_width() + surf.get_width() + button.w + 5 * layout.margin
+            <= layout.width
+        ):
             screen.blit(
                 surf,
                 (
-                    layout.width - layout.margin - surf.get_width(),
+                    button.left - layout.margin - surf.get_width(),
                     (layout.top_bar - surf.get_height()) // 2,
                 ),
             )
             break
 
+    draw_inferences_button(screen, fonts["top"], layout, show_inferences)
 
-def draw_scene(screen, fonts, panels, layout, fps, paused, fullscreen):
+
+def draw_scene(
+    screen, fonts, panels, layout, fps, paused, fullscreen, show_inferences=False
+):
     screen.fill(COLOR_BG)
-    draw_top_bar(screen, fonts, layout, fps, paused, fullscreen)
+    draw_top_bar(screen, fonts, layout, fps, paused, fullscreen, show_inferences)
 
     for index, panel in enumerate(panels):
         panel.draw(screen, fonts, layout, layout.panel_rect(index))
+
+    if show_inferences:
+        draw_inferences_overlay(screen, fonts, layout, panels)
 
     # Present the frame. Without this the double-buffered window stays black.
     pygame.display.flip()
@@ -885,6 +1096,7 @@ def main():
     clock = pygame.time.Clock()
     fps = max(1, args.fps)
     paused = False
+    show_inferences = False
     frame = 0
     running = True
 
@@ -894,7 +1106,12 @@ def main():
                 running = False
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
-                    running = False
+                    if show_inferences:
+                        show_inferences = False
+                    else:
+                        running = False
+                elif event.key == pygame.K_i:
+                    show_inferences = not show_inferences
                 elif event.key == pygame.K_SPACE:
                     paused = not paused
                 elif event.key == pygame.K_UP:
@@ -907,13 +1124,18 @@ def main():
                 elif event.key == pygame.K_f and not headless:
                     fullscreen = not fullscreen
                     screen, layout, fonts = create_display(fullscreen, args.size)
+            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                if inferences_button_rect(layout, fonts["top"]).collidepoint(event.pos):
+                    show_inferences = not show_inferences
 
         if not paused:
             # Strictly uniform: every loaded panel advances exactly one step.
             for panel in panels:
                 panel.tick()
 
-        draw_scene(screen, fonts, panels, layout, fps, paused, fullscreen)
+        draw_scene(
+            screen, fonts, panels, layout, fps, paused, fullscreen, show_inferences
+        )
 
         if args.save_frames:
             save_frame(screen, args.save_frames, frame)
